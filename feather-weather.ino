@@ -150,6 +150,9 @@ void do_send(osjob_t* j){
 
 void setup() {
     Serial.begin(9600);
+    while (!Serial) {
+        ; // wait for serial port to connect. Needed for native USB
+    }
     Serial.println(F("Starting"));
 
     #ifdef VCC_ENABLE
