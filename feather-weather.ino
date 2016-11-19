@@ -1,176 +1,95 @@
-/*******************************************************************************
- * Copyright (c) 2015 Thomas Telkamp and Matthijs Kooijman
- *
- * Permission is hereby granted, free of charge, to anyone
- * obtaining a copy of this document and accompanying files,
- * to do whatever they want with them without any restriction,
- * including, but not limited to, copying, modification and redistribution.
- * NO WARRANTY OF ANY KIND IS PROVIDED.
- *
- * This example sends a valid LoRaWAN packet with payload "Hello,
- * world!", using frequency and encryption settings matching those of
- * the The Things Network.
- *
- * This uses OTAA (Over-the-air activation), where where a DevEUI and
- * application key is configured, which are used in an over-the-air
- * activation procedure where a DevAddr and session keys are
- * assigned/generated for use with all further communication.
- *
- * Note: LoRaWAN per sub-band duty-cycle limitation is enforced (1% in
- * g1, 0.1% in g2), but not the TTN fair usage policy (which is probably
- * violated by this sketch when left running for longer)!
 
- * To use this sketch, first register your application and device with
- * the things network, to set or generate an AppEUI, DevEUI and AppKey.
- * Multiple devices can use the same AppEUI, but each device has its own
- * DevEUI and AppKey.
- *
- * Do not forget to define the radio type correctly in config.h.
- *
- *******************************************************************************/
+#include <Simple-LoRaWAN.h>
 
-#include <lmic.h>
-#include <hal/hal.h>
+#include <Wire.h>
 #include <SPI.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
 
-// This EUI must be in little-endian format, so least-significant-byte
-// first. When copying an EUI from ttnctl output, this means to reverse
-// the bytes. For TTN issued EUIs the last bytes should be 0xD5, 0xB3,
-// 0x70.
-static const u1_t PROGMEM APPEUI[8]={ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-void os_getArtEui (u1_t* buf) { memcpy_P(buf, APPEUI, 8);}
+using namespace SimpleLoRaWAN;
 
-// This should also be in little endian format, see above.
-static const u1_t PROGMEM DEVEUI[8]={ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-void os_getDevEui (u1_t* buf) { memcpy_P(buf, DEVEUI, 8);}
-
-// This key should be in big endian format (or, since it is not really a
-// number but a block of memory, endianness does not really apply). In
-// practice, a key taken from ttnctl can be copied as-is.
-// The key shown here is the semtech default key.
-static const u1_t PROGMEM APPKEY[16] = { 0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C };
-void os_getDevKey (u1_t* buf) {  memcpy_P(buf, APPKEY, 16);}
-
-static uint8_t mydata[] = "Hello, world!";
-static osjob_t sendjob;
-
-// Schedule TX every this many seconds (might become longer due to duty
-// cycle limitations).
-const unsigned TX_INTERVAL = 60;
+// TTN mapper
+uint32_t devAddr    = 0x7DD44BFC;
+uint8_t nwksKey[16] = { 0xEE, 0x1E, 0xF2, 0x15, 0x12, 0x5F, 0xD5, 0xCD, 0xAD, 0xA7, 0xBB, 0xE9, 0x3E, 0x4F, 0x53, 0x52 }; // MSBF
+uint8_t appKey[16]  = { 0x6F, 0x45, 0x4E, 0x31, 0x3D, 0xB4, 0xE5, 0x75, 0x02, 0x55, 0x6C, 0x62, 0xB0, 0xCB, 0xD0, 0xD8 }; // MSBF
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
     .nss = 8,
     .rxtx = LMIC_UNUSED_PIN,
-    .rst = 4,
-    .dio = {5, 6, 10},
+    .rst = LMIC_UNUSED_PIN,
+    .dio = {3, 6, LMIC_UNUSED_PIN},
 };
 
-void onEvent (ev_t ev) {
-    Serial.print(os_getTime());
-    Serial.print(": ");
-    switch(ev) {
-        case EV_SCAN_TIMEOUT:
-            Serial.println(F("EV_SCAN_TIMEOUT"));
-            break;
-        case EV_BEACON_FOUND:
-            Serial.println(F("EV_BEACON_FOUND"));
-            break;
-        case EV_BEACON_MISSED:
-            Serial.println(F("EV_BEACON_MISSED"));
-            break;
-        case EV_BEACON_TRACKED:
-            Serial.println(F("EV_BEACON_TRACKED"));
-            break;
-        case EV_JOINING:
-            Serial.println(F("EV_JOINING"));
-            break;
-        case EV_JOINED:
-            Serial.println(F("EV_JOINED"));
+Node* node;
 
-            // Disable link check validation (automatically enabled
-            // during join, but not supported by TTN at this time).
-            LMIC_setLinkCheckMode(0);
-            break;
-        case EV_RFU1:
-            Serial.println(F("EV_RFU1"));
-            break;
-        case EV_JOIN_FAILED:
-            Serial.println(F("EV_JOIN_FAILED"));
-            break;
-        case EV_REJOIN_FAILED:
-            Serial.println(F("EV_REJOIN_FAILED"));
-            break;
-            break;
-        case EV_TXCOMPLETE:
-            Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
-            if (LMIC.txrxFlags & TXRX_ACK)
-              Serial.println(F("Received ack"));
-            if (LMIC.dataLen) {
-              Serial.println(F("Received "));
-              Serial.println(LMIC.dataLen);
-              Serial.println(F(" bytes of payload"));
-            }
-            // Schedule next transmission
-            os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
-            break;
-        case EV_LOST_TSYNC:
-            Serial.println(F("EV_LOST_TSYNC"));
-            break;
-        case EV_RESET:
-            Serial.println(F("EV_RESET"));
-            break;
-        case EV_RXCOMPLETE:
-            // data received in ping slot
-            Serial.println(F("EV_RXCOMPLETE"));
-            break;
-        case EV_LINK_DEAD:
-            Serial.println(F("EV_LINK_DEAD"));
-            break;
-        case EV_LINK_ALIVE:
-            Serial.println(F("EV_LINK_ALIVE"));
-            break;
-         default:
-            Serial.println(F("Unknown event"));
-            break;
+Adafruit_BME280 bme; // I2C
+#define SEALEVELPRESSURE_HPA (1013.25)
+
+static const unsigned long REFRESH_INTERVAL = 10000; // ms
+static unsigned long lastRefreshTime = 0;
+
+void getValues(){
+    uint16_t temperature = (uint16_t) ((bme.readTemperature() + 273.15f) * 100.0f);
+    uint32_t pressure = (uint32_t) (bme.readPressure());
+    uint16_t humidity = (uint16_t) (bme.readHumidity()*100.0f);
+
+    uint8_t data[7] = {0};
+
+    memcpy(data + 0, &((uint8_t*) (&temperature))[1], 1);
+    memcpy(data + 1, &((uint8_t*) (&temperature))[0], 1);
+    memcpy(data + 2, &((uint8_t*) (&pressure))[2], 1);
+    memcpy(data + 3, &((uint8_t*) (&pressure))[1], 1);
+    memcpy(data + 4, &((uint8_t*) (&pressure))[0], 1);
+    memcpy(data + 5, &((uint8_t*) (&humidity))[1], 1);
+    memcpy(data + 6, &((uint8_t*) (&humidity))[0], 1);
+
+    node->send(data,7);
+
+    for(int i = 0; i < 8; i++){
+      Serial1.print(data[i], HEX);
+      Serial1.print(", ");
+    }
+    Serial1.println("");
+
+    Serial1.print("Temperature = ");
+    Serial1.print(bme.readTemperature());
+    Serial1.println(" *C");
+
+    Serial1.print("Pressure = ");
+
+    Serial1.print(bme.readPressure() / 100.0F);
+    Serial1.println(" hPa");
+
+    Serial1.print("Approx. Altitude = ");
+    Serial1.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
+    Serial1.println(" m");
+
+    Serial1.print("Humidity = ");
+    Serial1.print(bme.readHumidity());
+    Serial1.println(" %");    
+}
+
+void setup()
+{
+    Serial1.begin(115200);
+    Serial1.println("--- Feather-Weather ---");
+    node = new ABP::Node(devAddr, nwksKey, appKey);
+    //node = new OTAA::Node(appEui, devEui, appKey);
+    node->disableLinkCheck();
+
+    if (!bme.begin()) {
+      Serial1.println("Could not find a valid BME280 sensor, check wiring!");
+      while (1);
     }
 }
 
-void do_send(osjob_t* j){
-    // Check if there is not a current TX/RX job running
-    if (LMIC.opmode & OP_TXRXPEND) {
-        Serial.println(F("OP_TXRXPEND, not sending"));
-    } else {
-        // Prepare upstream data transmission at the next possible time.
-        LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
-        Serial.println(F("Packet queued"));
-    }
-    // Next TX is scheduled after TX_COMPLETE event.
+void loop(){
+  node->process();
+  if(millis() - lastRefreshTime >= REFRESH_INTERVAL)
+  {
+    lastRefreshTime += REFRESH_INTERVAL;
+    getValues();
+  }
 }
 
-void setup() {
-    Serial.begin(9600);
-    while (!Serial) {
-        ; // wait for serial port to connect. Needed for native USB
-    }
-    Serial.println(F("Starting"));
-
-    #ifdef VCC_ENABLE
-    // For Pinoccio Scout boards
-    pinMode(VCC_ENABLE, OUTPUT);
-    digitalWrite(VCC_ENABLE, HIGH);
-    delay(1000);
-    #endif
-
-    // LMIC init
-    os_init();
-    // Reset the MAC state. Session and pending data transfers will be discarded.
-    LMIC_reset();
-
-    // Start job (sending automatically starts OTAA too)
-    do_send(&sendjob);
-}
-
-void loop() {
-    os_runloop_once();
-}
